@@ -4006,10 +4006,52 @@ namespace Tpetra {
       const impl_scalar_type alpha_IST (alpha);
 
       ProfilingRegion regionGemm ("Tpetra::MV::multiply-call-gemm");
-      KokkosBlas::gemm (&ctransA, &ctransB, alpha_IST, A_sub, B_sub,
-                        beta_local, C_sub);
-    }
 
+      // SA: Default (09/29/2019)
+      if(transA == Teuchos::NO_TRANS)
+	KokkosBlas::gemm (&ctransA, &ctransB, alpha_IST, A_sub, B_sub,
+			  beta_local, C_sub);
+
+
+      // SA: (09/29/2019) Optimization when the first matrix is transposed
+      // The number of rows (in the transposed matrix) is too small for our case
+      // Here, We should also check the number of rows here, to make sure  
+      else {
+
+
+      	int ndots = C_numVecs * C_lclNumRows;;
+      	if(const char* env_p = std::getenv("TWO_LEVEL_GEMM")) {
+      	  const Kokkos::TeamPolicy<> policy( ndots, Kokkos::AUTO );
+      	  Kokkos::parallel_for( policy, KOKKOS_LAMBDA ( const Kokkos::TeamPolicy<>::member_type &teamMember) {
+      	      const int i = teamMember.league_rank();
+      	      const int r = i / C_numVecs;
+      	      const int c = i % C_numVecs;
+      	      double result2 = 0;
+      	      Kokkos::parallel_reduce( Kokkos::TeamThreadRange(teamMember, A_lclNumRows), [&] ( const int &k, double &update ) {
+      		  update += A_sub(k,r) * B_sub(k,c);
+      		}, result2 );
+      	      C_sub(r,c) = result2;
+	      
+      	    } );
+	  
+	  
+      	}
+      	else {
+      	  for(int it = 0; it < ndots; ++it) {
+      	    int r = it / C_numVecs;
+      	    int c = it % C_numVecs;
+	    
+      	    double result2 = 0;
+      	    Kokkos::parallel_reduce( A_lclNumRows, KOKKOS_LAMBDA ( const int &k, double &update ) {
+      		update += A_sub(k,r) * B_sub(k,c);
+      	      }, result2 );
+      	    C_sub(r,c) = result2;
+      	  }
+      	}
+	
+      }
+    }
+    
     if (! isConstantStride ()) {
       ::Tpetra::deep_copy (*this, *C_tmp); // Copy the result back into *this.
     }
