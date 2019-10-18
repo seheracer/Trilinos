@@ -1098,6 +1098,13 @@ namespace Tpetra {
 #endif
 
   public:
+
+    Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+    getCombinatorialLaplacian ();
+    Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+    getNormalizedLaplacian ();
+
+
     //@}
     //! @name Methods for inserting, modifying, or removing entries
     //@{
@@ -2331,7 +2338,7 @@ namespace Tpetra {
     /// \brief Perform a fillComplete on a matrix that already has data.
     ///
     /// The matrix must already have filled local 1-D storage
-    /// (k_clInds1D_ and k_rowPtrs_ for the graph, and k_values1D_ in
+    /// (k_lclInds1D_ and k_rowPtrs_ for the graph, and k_values1D_ in
     /// the matrix).  If the matrix has been constructed in any other
     /// way, this method will throw an exception.  This routine is
     /// needed to support other Trilinos packages and should not be

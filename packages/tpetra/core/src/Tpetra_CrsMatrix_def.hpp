@@ -2338,6 +2338,172 @@ namespace Tpetra {
 #endif // HAVE_TPETRA_DEBUG
   }
 
+
+  // This function assumes each row is assigned to a single MPI rank
+  // That's why it doesn't communicate to compute the number of nonzeros in the rows.
+  // Fix this, SA.
+  template<class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+  Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+  CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+  getCombinatorialLaplacian ()
+  {
+
+    typedef typename local_matrix_type::values_type values_type;
+    typedef Kokkos::View<GlobalOrdinal*, Kokkos::LayoutLeft> view_type;
+    using range_policy = Kokkos::RangePolicy<execution_space, Kokkos::IndexType<LocalOrdinal>>;
+
+    const size_t numEnt = this->getNodeNumEntries();
+    values_type newVal ("CombinatorialLaplacian::val", numEnt);
+
+    auto lclGraph = this->getCrsGraph();
+    auto colInds = lclGraph->k_lclInds1D_;
+    auto rowPtrs = lclGraph->k_rowPtrs_;
+
+    auto rowMap = this->getRowMap();
+    auto colMap = this->getColMap();
+
+    size_t numLclRows = rowMap->getNodeNumElements();
+    size_t numLclCols = colMap->getNodeNumElements();
+
+    view_type rowLocalToGlobal(Kokkos::view_alloc("rowLocalToGlobal", Kokkos::WithoutInitializing), numLclRows);
+    view_type colLocalToGlobal(Kokkos::view_alloc("colLocalToGlobal", Kokkos::WithoutInitializing), numLclCols);
+    
+    auto rowMapHost = Kokkos::create_mirror_view (Kokkos::HostSpace (), rowLocalToGlobal);
+    auto colMapHost = Kokkos::create_mirror_view (Kokkos::HostSpace (), colLocalToGlobal);
+
+    for(size_t i = 0; i < numLclRows; ++i)
+      rowMapHost[i] = rowMap->getGlobalElement(i);
+
+    for(size_t i = 0; i < numLclCols; ++i)
+      colMapHost[i] = colMap->getGlobalElement(i);
+
+    Kokkos::deep_copy (rowLocalToGlobal, rowMapHost);
+    Kokkos::deep_copy (colLocalToGlobal, colMapHost);
+
+    Kokkos::parallel_for("CombinatorialLaplacian", range_policy(0, numLclRows),
+			    KOKKOS_LAMBDA(const LocalOrdinal i){
+			      const GlobalOrdinal gRid = rowLocalToGlobal(i);
+			   
+			      const size_t start = rowPtrs(i);
+			      const size_t end = rowPtrs(i+1);
+			      
+			      for(size_t j = start; j < end; ++j) {
+				
+				const GlobalOrdinal gCid = colLocalToGlobal(colInds(j)); 
+				if(gCid == gRid)
+				  newVal(j) = end - start - 1;
+				else
+				  newVal(j) = -1;
+			      }
+			    }			   
+			 );
+
+    execution_space().fence ();
+
+     Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> lapl = 
+       Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+       (new CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>(lclGraph, newVal));
+
+     lapl->fillComplete (this->getDomainMap (), this->getRangeMap ());
+     
+     return lapl;
+  }
+
+  template<class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
+  Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+  CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::
+  getNormalizedLaplacian ()
+  {
+
+    typedef typename local_matrix_type::values_type values_type;
+    typedef Kokkos::View<GlobalOrdinal*, Kokkos::LayoutLeft> view_type;
+    using range_policy = Kokkos::RangePolicy<execution_space, Kokkos::IndexType<LocalOrdinal>>;
+
+    const size_t numEnt = this->getNodeNumEntries();
+    values_type newVal ("NormalizedLaplacian::val", numEnt);
+
+    auto lclGraph = this->getCrsGraph();
+    auto colInds = lclGraph->k_lclInds1D_;
+    auto rowPtrs = lclGraph->k_rowPtrs_;
+
+    auto rowMap = this->getRowMap();
+    auto colMap = this->getColMap();
+
+    size_t numLclRows = rowMap->getNodeNumElements();
+    size_t numGblRows = rowMap->getGlobalNumElements();
+    size_t numLclCols = colMap->getNodeNumElements();
+
+    view_type rowLocalToGlobal(Kokkos::view_alloc("rowLocalToGlobal", Kokkos::WithoutInitializing), numLclRows);
+    view_type colLocalToGlobal(Kokkos::view_alloc("colLocalToGlobal", Kokkos::WithoutInitializing), numLclCols);
+
+    auto rowMapHost = Kokkos::create_mirror_view (Kokkos::HostSpace (), rowLocalToGlobal);
+    auto colMapHost = Kokkos::create_mirror_view (Kokkos::HostSpace (), colLocalToGlobal);
+
+    for(size_t i = 0; i < numLclRows; ++i)
+      rowMapHost[i] = rowMap->getGlobalElement(i);
+
+    for(size_t i = 0; i < numLclCols; ++i)
+      colMapHost[i] = colMap->getGlobalElement(i);
+
+    Kokkos::deep_copy (rowLocalToGlobal, rowMapHost);
+    Kokkos::deep_copy (colLocalToGlobal, colMapHost);
+
+    view_type lclDegree(Kokkos::view_alloc("lclDegree", Kokkos::WithoutInitializing), numGblRows);
+    view_type gblDegree(Kokkos::view_alloc("gblDegree", Kokkos::WithoutInitializing), numGblRows);
+
+    Kokkos::parallel_for("NormalizedLaplacian::init local degrees", range_policy(0, numGblRows),
+			 KOKKOS_LAMBDA(const GlobalOrdinal i){
+			   lclDegree(i) = 0;
+			 }			   
+			 );
+
+    execution_space().fence ();
+    Kokkos::parallel_for("NormalizedLaplacian::compute local degrees", range_policy(0, numLclRows),
+			 KOKKOS_LAMBDA(const LocalOrdinal i){
+			   const GlobalOrdinal gRid = rowLocalToGlobal(i);
+			   lclDegree(gRid) = rowPtrs(i+1) - rowPtrs(i) -1; 
+			 }			   
+			 );
+    
+    execution_space().fence ();
+    
+    Teuchos::reduceAll<int, GlobalOrdinal> (*(this->getComm()), Teuchos::REDUCE_SUM, numGblRows, lclDegree.data(), gblDegree.data());
+    
+    
+    Kokkos::parallel_for("NormalizedLaplacian", range_policy(0, numLclRows),
+    			    KOKKOS_LAMBDA(const LocalOrdinal i){
+    			      const GlobalOrdinal gRid = rowLocalToGlobal(i);
+			   
+    			      const size_t start = rowPtrs(i);
+    			      const size_t end = rowPtrs(i+1);
+    			      const GlobalOrdinal deg = end - start - 1;
+			      
+    			      for(size_t j = start; j < end; ++j) {
+				
+    				const GlobalOrdinal gCid = colLocalToGlobal(colInds(j)); 
+    				if(gCid == gRid)
+    				  newVal(j) = 1;
+    				  else {
+    				    GlobalOrdinal degj = gblDegree(gCid);
+				    newVal(j) = -1.0/(STM::sqrt(degj*deg));
+				  }
+				    
+    			      }
+    			    }			   
+    			 );
+
+    execution_space().fence ();
+
+     Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>> lapl = 
+       Teuchos::RCP<CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>>
+       (new CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>(lclGraph, newVal));
+     
+     lapl->fillComplete (this->getDomainMap (), this->getRangeMap ());
+     
+     return lapl;
+  }
+
+
   template<class Scalar, class LocalOrdinal, class GlobalOrdinal, class Node>
   void
   CrsMatrix<Scalar, LocalOrdinal, GlobalOrdinal, Node>::

@@ -4008,73 +4008,86 @@ namespace Tpetra {
       ProfilingRegion regionGemm ("Tpetra::MV::multiply-call-gemm");
 
       // SA: Default (09/29/2019)
-      if(transA == Teuchos::NO_TRANS)
+      if(transA == Teuchos::NO_TRANS) {
+
 	KokkosBlas::gemm (&ctransA, &ctransB, alpha_IST, A_sub, B_sub,
 			  beta_local, C_sub);
 
-
+      }
       // SA: (09/29/2019) Optimization when the first matrix is transposed
       // The number of rows (in the transposed matrix) is too small for our case
-      // Here, We should also check the number of rows here, to make sure  
+      // We should also check the number of rows here, to make sure  
       else {
 
+	if(const char* env_p = std::getenv("USE_CUBLAS")) {
+	  Teuchos::RCP<Teuchos::Time> timerATB = Teuchos::TimeMonitor::getNewTimer("CUBLAS GEMM");
+	  Teuchos::TimeMonitor lcltimer( *timerATB);
+	  KokkosBlas::gemm (&ctransA, &ctransB, alpha_IST, A_sub, B_sub,
+			  beta_local, C_sub);
+	}
+	else {
 
-      	// int ndots = C_numVecs * C_lclNumRows;;
-      	// if(const char* env_p = std::getenv("TWO_LEVEL_GEMM")) {
-      	//   const Kokkos::TeamPolicy<> policy( ndots, Kokkos::AUTO );
-      	//   Kokkos::parallel_for( policy, KOKKOS_LAMBDA ( const Kokkos::TeamPolicy<>::member_type &teamMember) {
-      	//       const int i = teamMember.league_rank();
-      	//       const int r = i / C_numVecs;
-      	//       const int c = i % C_numVecs;
-      	//       double result2 = 0;
-      	//       Kokkos::parallel_reduce( Kokkos::TeamThreadRange(teamMember, A_lclNumRows), [&] ( const int &k, double &update ) {
-      	// 	  update += A_sub(k,r) * B_sub(k,c);
-      	// 	}, result2 );
-      	//       C_sub(r,c) = result2;
+	  // // SEHER, Don't forget this line here!!
+	  // RCP<MV> C_tmp2 = rcp (new MV (*this, Teuchos::Copy)); // deep copy
+	  // auto C_lcl2 = C_tmp2->getLocalViewDevice ();
+	  // auto C_sub2 = Kokkos::subview (C_lcl2,
+	  // 				std::make_pair (LO (0), C_lclNumRows),
+	  // 				std::make_pair (LO (0), C_numVecs));
+
+	  Teuchos::RCP<Teuchos::Time> timerATB = Teuchos::TimeMonitor::getNewTimer("KOKKOS GEMM");
+	  Teuchos::TimeMonitor lcltimer( *timerATB);
+
+	  int ndots = C_numVecs * C_lclNumRows;
+	  // for(int ii = 0; ii < C_numVecs; ++ii)
+	  //   for(int jj = 0; jj < C_lclNumRows; ++jj)
+	  //     C_sub(jj, ii) = 0.0;
+  
+	  int factor = 512 / ndots;
+	  const Kokkos::TeamPolicy<> policy( ndots*factor, Kokkos::AUTO );
+
+	  Kokkos::parallel_for( policy, KOKKOS_LAMBDA ( const Kokkos::TeamPolicy<>::member_type &teamMember) {
+	      const int globalRank = teamMember.league_rank();
+	      const int localRank = globalRank % factor;
+	      const int i = globalRank / factor;
+	      const int rowId = i / C_numVecs;
+	      const int colId = i % C_numVecs;
+
+	      // const int rowId = globalRank / C_numVecs;
+	      // const int colId = globalRank % C_numVecs;
+  
+	      Scalar result2 = 0;
+
+	      int workSize = (A_lclNumRows / factor)+1;
+	      const int baseInd = workSize*localRank;
+	      Kokkos::parallel_reduce( Kokkos::TeamThreadRange(teamMember, workSize), [&]( const int &k, Scalar &update ) {
+		  if(baseInd + k < A_lclNumRows)
+		    update += A_sub(baseInd+k, rowId) * B_sub(baseInd+k,colId);
+		}, result2 );
+
+	      if(teamMember.team_rank() == 0)
+		Kokkos::atomic_add(&C_sub(rowId, colId), result2);
+
+	    } );
+
+
+	  execution_space().fence();
+	
+
+	  
+	  // KokkosBlas::gemm (&ctransA, &ctransB, alpha_IST, A_sub, B_sub, beta_local, C_sub2);
+
+
+	  // for(int jj = 0; jj < C_numVecs; ++jj){
+	  //   for(int ii = 0; ii < C_lclNumRows; ++ii) {
+	  //     Scalar diff = C_sub2(ii, jj) - C_sub(ii, jj);
+	  //     if(diff > 0.00001 || diff < -0.00001)
+	  // 	std::cout << "FARKLI SONUC: " << C_sub(ii, jj) << " " << C_sub2(ii, jj) << "\n\n";
 	      
-      	//     } );
-	  
-	  
-      	// }
-      	// else {
-      	//   for(int it = 0; it < ndots; ++it) {
-      	//     int r = it / C_numVecs;
-      	//     int c = it % C_numVecs;
-	    
-      	//     double result2 = 0;
-      	//     Kokkos::parallel_reduce( A_lclNumRows, KOKKOS_LAMBDA ( const int &k, double &update ) {
-      	// 	update += A_sub(k,r) * B_sub(k,c);
-      	//       }, result2 );
-      	//     C_sub(r,c) = result2;
-      	//   }
-      	// }
-
-      	int ndots = C_numVecs * C_lclNumRows;
-	int factor = 512 / ndots;
-	const Kokkos::TeamPolicy<> policy( ndots*factor, Kokkos::AUTO );
-
-	Kokkos::parallel_for( policy, KOKKOS_LAMBDA ( const Kokkos::TeamPolicy<>::member_type &teamMember) {
-	    const int globalRank = teamMember.league_rank();
-	    const int localRank = globalRank % factor;
-	    const int i = globalRank / factor;
-	    const int rowId = i / C_numVecs;
-	    const int colId = i % C_numVecs;
-
-	    Scalar result2 = 0;
-
-	    int workSize = (A_lclNumRows / factor) + 1;
-	    const int baseInd = workSize*localRank;
-	    Kokkos::parallel_reduce( Kokkos::TeamThreadRange(teamMember, workSize), [&]( const int &k, Scalar &update ) {
-		if(baseInd + k < A_lclNumRows)
-		  update += A_sub(baseInd+k,rowId) * B_sub(baseInd+k,colId);
-	      }, result2 );
-
-	    if(teamMember.team_rank() == 0)
-	      Kokkos::atomic_add(&C_sub(rowId,colId), result2);
-
-	  } );
+	  //   }
+	  // }
 
 
+	}
 	
       }
     }
