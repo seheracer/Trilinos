@@ -74,7 +74,8 @@ public:
                   const Teuchos::ParameterList &params) :
                   Distribution<gno_t,scalar_t>(nrows_, comm_, params),
                   initialDist(nrows_, comm_, params),
-                  sortByDegree(false), redistributed(false), nChunks(0)
+                  sortByDegree(false), redistributed(false), 
+		  chunksComputed(false), nChunks(0)
   {
     int npnp = 2 * np;
     nChunks = int(std::sqrt(float(npnp)));
@@ -89,6 +90,9 @@ public:
     const Teuchos::ParameterEntry *pe = params.getEntryPtr("sortByDegree");
     if (pe != NULL) sortByDegree = pe->getValue<bool>(&sortByDegree);
 
+    pe = params.getEntryPtr("readPerProcess");
+    if (pe != NULL) redistributed = pe->getValue<bool>(&redistributed);
+
     if (me == 0) std::cout << "\n LowerTriangularBlock Distribution: "
                            << "\n     np      = " << np 
                            << "\n     nChunks = " << nChunks
@@ -97,7 +101,15 @@ public:
 
   enum DistributionType DistType() { return LowerTriangularBlock; }
 
-  Teuchos::Array<gno_t> getChunkCuts() { return chunkCuts; }
+  Teuchos::Array<gno_t> getChunkCuts() { 
+    if(chunksComputed)
+      return chunkCuts; 
+    else {
+      throw std::runtime_error("Error:  Requested chunk cuts have not been computed yet.");
+    }
+  }
+
+  bool areChunksComputed() {return chunksComputed; }
 
   // Return whether this rank owns vector entry i.
   // TODO:  for now, use same vector dist as 1DLinear;
@@ -251,6 +263,7 @@ public:
     Teuchos::Array<gno_t>().swap(globalRowBuf);
 
     Teuchos::broadcast<int,gno_t>(*comm, 0, chunkCuts(0,nChunks+1));
+    chunksComputed = true;
 
     //std::cout << comm->getRank() << " KDDKDD chunkCuts: ";
     //for (int kdd=0; kdd <= nChunks; kdd++) std::cout << chunkCuts[kdd] << " ";
@@ -317,7 +330,15 @@ private:
   bool sortByDegree;
 
   // Flag whether redistribution has occurred yet
+  // This is true 
+  //   i) after Tpetra performs the redistribution or 
+  //  ii) when Tpetra reads already-distributed nonzeros in per-process files 
   bool redistributed;  
+
+  // If we read the already-distributed nonzeros from per-process files, 
+  //  this will remain false until a triangle counting code actually computes 
+  //  the chunks when the need arises.
+  bool chunksComputed;
 
   int nChunks;  // in np = q(q+1)/2 layout, nChunks = q
   double nChunksPerRow;
